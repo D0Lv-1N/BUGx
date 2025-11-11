@@ -432,6 +432,24 @@ delete_installed_tools() {
         fi
     done <<< "$TOOLS_LIST"
 
+    # Remove configuration files and directories
+    log_info "Removing configuration files and directories..."
+
+    # Remove wordlists directory
+    if [ -d "$HOME/wordlist" ]; then
+        rm -rf "$HOME/wordlist" 2>/dev/null && log_ok "Removed wordlists directory" || log_warn "Failed to remove wordlists directory"
+    fi
+
+    # Remove GF patterns directory
+    if [ -d "$HOME/Gf-Patterns" ]; then
+        rm -rf "$HOME/Gf-Patterns" 2>/dev/null && log_ok "Removed GF patterns directory" || log_warn "Failed to remove GF patterns directory"
+    fi
+
+    # Remove gau configuration
+    if [ -f "$HOME/.gau.toml" ]; then
+        rm -f "$HOME/.gau.toml" 2>/dev/null && log_ok "Removed gau configuration" || log_warn "Failed to remove gau configuration"
+    fi
+
     # Remove temporary files
     cleanup_temp_dir
 
@@ -616,6 +634,14 @@ print_summary() {
     echo
     echo "Installation Directory: $INSTALL_DIR"
     echo "Installation Log: $INSTALL_LOG"
+    echo
+
+    # Configuration Setup Summary
+    echo "Additional Configurations:"
+    echo "  • Wordlists: $HOME/wordlist"
+    echo "  • GF Patterns: $HOME/Gf-Patterns"
+    echo "  • Gau Config: $HOME/.gau.toml"
+    echo "  • GF Templates: $HOME/.gf/"
     echo
 
     # PATH check
