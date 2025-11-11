@@ -1,57 +1,20 @@
 #!/usr/bin/env bash
 #
-# BUG-X setup.sh
+# BUG-X Comprehensive Setup Installer
 #
-# Fungsi:
-# - Auto detect OS (Linux/macOS/Termux basic).
-# - Deteksi & install tools eksternal yang dibutuhkan BUG-X (20 tools utama).
-# - Hanya gunakan Go (go install) untuk install tools Go-based.
-# - Jika binary sudah ada di PATH, skip.
-# - Jika binary ada di GOPATH/bin tapi tidak di PATH, salin ke INSTALL_DIR.
-# - Jika belum ada, coba install. Kalau gagal → STOP dan jelaskan.
-# - Flag: ./setup.sh --delete
-#   - Menghapus semua binary yang pernah dipasang oleh setup.sh dari INSTALL_DIR.
-#   - Tidak menghapus:
-#       - setup.sh
-#       - Go & environment asli user
-# - Jika Go tidak ada → STOP dengan pesan:
-#     "silahkan install golang terlebih dahulu (https://go.dev/doc/install)"
+# Features:
+# - Install 25+ bug hunting tools dengan multiple methods
+# - Auto-detect existing installations
+# - Multi-installation methods: go install, pip, npm, apt, manual
+# - Auto-move binaries to PATH for global access
+# - --delete flag untuk uninstall everything
+# - Installation summary report
+# - Support for Linux/macOS/Termux
 #
-# Catatan:
-# - Script ini TIDAK membuat wordlists lokal dan tidak utak-atik sistem di luar scope.
-# - INSTALL_DIR utama:
-#     - $HOME/.local/bin (tanpa sudo)
-#     - /usr/local/bin (jika bisa tulis)
-# - Tools yang dikelola (core set):
-#     - subfinder
-#     - httpx
-#     - gau
-#     - waybackurls
-#     - gf
-#     - dalfox
-#     - nuclei
-#     - sqlmap         (manual)
-#     - ffuf
-#     - dirsearch      (manual)
-#     - gobuster       (manual)
-#     - feroxbuster    (manual)
-#     - wpscan         (manual)
-#     - whatweb        (manual)
-#     - wappalyzer-cli (manual)
-#     - oralyzer       (manual)
-#     - massdns        (manual)
-#     - dnsx
-#     - amass
-#     - assetfinder
-#     - findomain      (manual)
-#
-# Rujukan:
-# - Wordlists: https://github.com/D0Lv-1N/wordlist.git
-# - GF patterns: https://github.com/1ndianl33t/Gf-Patterns
-#
-# Pada akhir setup:
-# - Cetak tools yang terinstall & yang belum.
-# - Cetak config default gau (~/.gau.toml) bila belum ada.
+# Usage:
+#   ./setup.sh              # Install all tools
+#   ./setup.sh --delete     # Remove all installed tools
+#   ./setup.sh --check      # Check installation status
 #
 
 set -euo pipefail
@@ -59,314 +22,503 @@ set -euo pipefail
 PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SCRIPT_NAME="$(basename "$0")"
 
-# ========= Warna =========
-RED="$(printf '\033[31m')"
-GREEN="$(printf '\033[32m')"
-YELLOW="$(printf '\033[33m')"
-BLUE="$(printf '\033[34m')"
-MAGENTA="$(printf '\033[35m')"
-CYAN="$(printf '\033[36m')"
-RESET="$(printf '\033[0m')"
+# ========= Colors =========
+RED='\033[31m'
+GREEN='\033[32m'
+YELLOW='\033[33m'
+BLUE='\033[34m'
+MAGENTA='\033[35m'
+CYAN='\033[36m'
+NC='\033[0m' # No Color
 
-log_info()  { printf "${BLUE}[INFO]${RESET} %s\n" "$*"; }
-log_warn()  { printf "${YELLOW}[WARN]${RESET} %s\n" "$*"; }
-log_error() { printf "${RED}[ERROR]${RESET} %s\n" "$*"; }
-log_ok()    { printf "${GREEN}[OK]${RESET} %s\n" "$*"; }
+# ========= Logging Functions =========
+log_info()  { printf "${BLUE}[INFO]${NC} %s\n" "$*"; }
+log_warn()  { printf "${YELLOW}[WARN]${NC} %s\n" "$*"; }
+log_error() { printf "${RED}[ERROR]${NC} %s\n" "$*"; }
+log_ok()    { printf "${GREEN}[OK]${NC} %s\n" "$*"; }
+log_step()  { printf "${MAGENTA}[STEP]${NC} %s\n" "$*"; }
+
+# ========= Global Variables =========
+INSTALL_DIR="/usr/local/bin"
+HOME_BIN="$HOME/.local/bin"
+TEMP_DIR="/tmp/bugx_setup_$$"
+INSTALL_LOG="$TEMP_DIR/install.log"
+INSTALLED_TOOLS=()
+FAILED_TOOLS=()
+SKIPPED_TOOLS=()
 
 # ========= OS Detection =========
-
 detect_os() {
-  if [ -n "${PREFIX-}" ] && echo "$PREFIX" | grep -qi "com.termux"; then
-    echo "termux"
-    return
-  fi
+    if [ -n "${PREFIX-}" ] && echo "$PREFIX" | grep -qi "com.termux"; then
+        echo "termux"
+        return
+    fi
 
-  local u
-  u="$(uname -s 2>/dev/null || echo "")"
-  case "$u" in
-    Linux*) echo "linux" ;;
-    Darwin*) echo "darwin" ;;
-    *) echo "unknown" ;;
-  esac
+    local os
+    os="$(uname -s 2>/dev/null || echo "")"
+    case "$os" in
+        Linux*) echo "linux" ;;
+        Darwin*) echo "darwin" ;;
+        *) echo "unknown" ;;
+    esac
 }
 
 OS_TYPE="$(detect_os)"
 
-# ========= Go Detection & Version Check =========
-
-ensure_go() {
-  if ! command -v go >/dev/null 2>&1; then
-    log_error "Go tidak ditemukan di PATH."
-    printf "%s\n" "silahkan install golang terlebih dahulu (https://go.dev/doc/install)"
-    exit 1
-  fi
-
-  local gov
-  gov="$(go version 2>/dev/null || true)"
-  if [ -z "$gov" ]; then
-    log_error "Gagal membaca versi Go."
-    printf "%s\n" "silahkan install golang terlebih dahulu (https://go.dev/doc/install)"
-    exit 1
-  fi
-
-  log_ok "Go terdeteksi: $gov"
-}
-
-# ========= Install Target Detection =========
-
+# ========= Installation Directory Detection =========
 detect_install_dir() {
-  # Semua tools hasil setup akan dipusatkan ke satu direktori global:
-  #   /usr/local/bin
-  # Script ini boleh dijalankan dengan:
-  #   ./setup.sh
-  # dan akan menggunakan sudo mv bila butuh hak akses lebih.
-  echo "/usr/local/bin"
+    # Check if we can write to /usr/local/bin
+    if [ -w "/usr/local/bin" ] || sudo [ -w "/usr/local/bin" ]; then
+        echo "/usr/local/bin"
+        return
+    fi
+
+    # Fallback to user local bin
+    if [ -w "$HOME_BIN" ] || mkdir -p "$HOME_BIN" 2>/dev/null; then
+        echo "$HOME_BIN"
+        return
+    fi
+
+    # Last resort: current directory
+    echo "$PROJECT_ROOT/bin"
 }
 
 INSTALL_DIR="$(detect_install_dir)"
 
-log_info "Direktori install default: $INSTALL_DIR"
+# ========= Tool Definitions =========
+# Format: name|method|package|install_cmd|description
+TOOLS_LIST=$(cat <<'EOF'
+# STAGE 1: SUBDOMAIN DISCOVERY
+subfinder|go|github.com/projectdiscovery/subfinder/v2/cmd/subfinder@latest|go install -v|Subdomain enumeration
+amass|go|github.com/owasp-amass/amass/v4/...@master|go install -v|Advanced subdomain discovery
+assetfinder|go|github.com/tomnomnom/assetfinder@latest|go install -v|Finding related domains
+findomain|manual|https://github.com/findomain/findomain/releases|download_bin|Fast subdomain finder
+shuffledns|go|github.com/projectdiscovery/shuffledns/cmd/shuffledns@latest|go install -v|Fast DNS resolver
 
-# ========= Tool List =========
-# Format: name|type|go_pkg
-# type:
-#   go      -> install dengan go install
-#   manual  -> hanya cek, user install manual
-TOOLS_DEFS="$(cat <<'EOF'
-subfinder|go|github.com/projectdiscovery/subfinder/v2/cmd/subfinder@latest
-httpx|go|github.com/projectdiscovery/httpx/cmd/httpx@latest
-gau|go|github.com/lc/gau/v2/cmd/gau@latest
-waybackurls|go|github.com/tomnomnom/waybackurls@latest
-gf|go|github.com/tomnomnom/gf@latest
-dalfox|go|github.com/hahwul/dalfox/v2@latest
-nuclei|go|github.com/projectdiscovery/nuclei/v3/cmd/nuclei@latest
-ffuf|go|github.com/ffuf/ffuf@latest
-dnsx|go|github.com/projectdiscovery/dnsx/cmd/dnsx@latest
-amass|go|github.com/owasp-amass/amass/v4/...@latest
-assetfinder|go|github.com/tomnomnom/assetfinder@latest
-sqlmap|manual|
-dirsearch|manual|
-gobuster|manual|
-feroxbuster|manual|
-wpscan|manual|
-whatweb|manual|
-massdns|manual|
-findomain|manual|
+# STAGE 2: HTTP PROBING & HOST DISCOVERY
+httpx|go|github.com/projectdiscovery/httpx/cmd/httpx@latest|go install -v|Fast HTTP probe & tech detection
+naabu|go|github.com/projectdiscovery/naabu/v2/cmd/naabu@latest|go install -v|Fast port scanner
+nuclei|go|github.com/projectdiscovery/nuclei/v3/cmd/nuclei@latest|go install -v|Vulnerability scanner
+wappalyzer|npm|wappalyzer-cli|wget -qO-|Technology fingerprinting
+
+# STAGE 3: URL DISCOVERY
+gau|go|github.com/lc/gau/v2/cmd/gau@latest|go install -v|URL extraction dari multiple sources
+waybackurls|go|github.com/tomnomnom/waybackurls@latest|go install -v|URLs dari wayback machine
+katana|go|github.com/projectdiscovery/katana/cmd/katana@latest|go install -v|Fast web crawler
+gospider|go|github.com/jaeles-project/gospider@latest|go install -v|Fast web spider
+
+# STAGE 4: PARAMETER & ENDPOINT ANALYSIS
+gf|go|github.com/tomnomnom/gf@latest|go install -v|Pattern matching for URLs
+paramspider|pip|paramspider|pip3 install|Parameter discovery dari URLs
+arjun|pip|arjun|pip3 install|Parameter detection & analysis
+qsreplace|go|github.com/tomnomnom/qsreplace@latest|go install -v|Parameter manipulation tool
+unfurl|go|github.com/tomnomnom/unfurl@latest|go install -v|Extract parameters from URLs
+kxss|go|github.com/Emoe/kxss@latest|go install -v|XSS parameter finder
+
+# UTILITY & HELPER TOOLS
+anew|go|github.com/tomnomnom/anew@latest|go install -v|Add new lines ignoring duplicates
+notify|go|github.com/projectdiscovery/notify/cmd/notify@latest|go install -v|Send notifications
+interactsh|go|github.com/projectdiscovery/interactsh/cmd/interactsh-client@latest|go install -v|OOB interaction checking
+
+# MANUAL TOOLS (Require manual installation)
+sqlmap|python|sqlmap|pip3 install sqlmap|SQL injection testing (may need manual setup)
+dirsearch|python|dirsearch|git clone|Web path scanner
+gobuster|apt|gobuster|apt-get install -y|Directory/file brute forcing
+nikto|apt|nikto|apt-get install -y|Web vulnerability scanner
+hydra|apt|hydra|apt-get install -y|Brute force attacks
+massdns|go|github.com/blechschmidt/massdns@latest|go install -v|High-performance DNS resolver
+commix|python|commix|pip3 install commix|Command injection testing
+dalfox|go|github.com/hahwul/dalfox/v2@latest|go install -v|Fast XSS scanner
+ffuf|go|github.com/ffuf/ffuf@latest|go install -v|Fast web fuzzer
+whatweb|apt|whatweb|apt-get install -y|Web application technology identification
+dnsx|go|github.com/projectdiscovery/dnsx/cmd/dnsx@latest|go install -v|DNS toolkit
 EOF
-)"
+)
 
-# ========= Helpers =========
+# ========= Utility Functions =========
 
-tool_exists_in_path() {
-  command -v "$1" >/dev/null 2>&1
+create_temp_dir() {
+    mkdir -p "$TEMP_DIR"
+    touch "$INSTALL_LOG"
 }
 
-tool_exists_in_dir() {
-  [ -x "$2/$1" ]
+cleanup_temp_dir() {
+    rm -rf "$TEMP_DIR"
 }
 
-copy_if_needed() {
-  # $1 = src, $2 = dest_dir, $3 = name
-  local src="$1"
-  local dest_dir="$2"
-  local name="$3"
-
-  if [ ! -e "$src" ]; then
-    return 1
-  fi
-
-  mkdir -p "$dest_dir"
-
-  # Jika sudah ada di dest dengan path benar, tidak perlu apa-apa
-  if [ -x "$dest_dir/$name" ]; then
-    log_ok "$name sudah ada di $dest_dir, skip move."
-    return 0
-  fi
-
-  # Pindahkan dengan sudo mv agar konsisten di satu direktori
-  if sudo mv "$src" "$dest_dir/$name"; then
-    sudo chmod +x "$dest_dir/$name" || true
-    log_ok "Moved $name -> $dest_dir/$name"
-    return 0
-  fi
-
-  log_error "Gagal memindahkan $name dari $src ke $dest_dir/$name"
-  return 1
+# Check if tool exists in PATH
+tool_exists() {
+    command -v "$1" >/dev/null 2>&1
 }
+
+# Check if tool exists in our install directory
+tool_installed_here() {
+    [ -x "$INSTALL_DIR/$1" ]
+}
+
+# Add tool to appropriate array
+mark_tool_installed() {
+    INSTALLED_TOOLS+=("$1")
+    log_ok "✓ $1"
+}
+
+mark_tool_failed() {
+    FAILED_TOOLS+=("$1")
+    log_error "✗ $1"
+}
+
+mark_tool_skipped() {
+    SKIPPED_TOOLS+=("$1")
+    log_info "⊘ $1 (already installed)"
+}
+
+# ========= Installation Methods =========
 
 install_go_tool() {
-  local name="$1"
-  local pkg="$2"
+    local name="$1"
+    local pkg="$2"
+    local description="$3"
 
-  log_info "Menginstall $name via go install ($pkg)..."
+    log_step "Installing $name via go install..."
 
-  if ! go install "$pkg"; then
-    log_error "Gagal go install $pkg untuk $name."
-    log_error "Silakan periksa koneksi, GOPATH/GOBIN, atau install manual."
-    exit 1
-  fi
+    if ! go install -v "$pkg" 2>&1 | tee -a "$INSTALL_LOG"; then
+        log_error "Failed to go install $name"
+        return 1
+    fi
 
-  local gopath gobin candidate=""
-  gopath="$(go env GOPATH 2>/dev/null || echo "")"
-  gobin="$(go env GOBIN 2>/dev/null || echo "")"
+    # Find the binary
+    local gopath gobin binary_path=""
+    gobin="$(go env GOBIN 2>/dev/null || echo "")"
+    gopath="$(go env GOPATH 2>/dev/null || echo "$HOME/go")"
 
-  if [ -n "$gobin" ] && [ -x "$gobin/$name" ]; then
-    candidate="$gobin/$name"
-  elif [ -n "$gopath" ] && [ -x "$gopath/bin/$name" ]; then
-    candidate="$gopath/bin/$name"
-  fi
+    if [ -n "$gobin" ] && [ -x "$gobin/$name" ]; then
+        binary_path="$gobin/$name"
+    elif [ -f "$gopath/bin/$name" ]; then
+        binary_path="$gopath/bin/$name"
+    else
+        log_error "Could not find installed binary for $name"
+        return 1
+    fi
 
-  if [ -z "$candidate" ]; then
-    log_error "go install sukses tapi binary $name tidak ditemukan."
-    log_error "Cek GOPATH/GOBIN Anda. Setup dihentikan."
-    exit 1
-  fi
+    # Move to install directory
+    mkdir -p "$INSTALL_DIR"
+    if [ "$INSTALL_DIR" != "$(dirname "$binary_path")" ]; then
+        if sudo cp "$binary_path" "$INSTALL_DIR/$name" 2>/dev/null || cp "$binary_path" "$INSTALL_DIR/$name"; then
+            chmod +x "$INSTALL_DIR/$name" 2>/dev/null || true
+        else
+            log_error "Failed to copy $name to $INSTALL_DIR"
+            return 1
+        fi
+    fi
 
-  if ! copy_if_needed "$candidate" "$INSTALL_DIR" "$name"; then
-    log_error "Gagal menyalin $name ke $INSTALL_DIR. Tambahkan $candidate ke PATH Anda."
-    exit 1
-  fi
+    return 0
+}
 
-  log_ok "$name terinstall di $INSTALL_DIR"
+install_pip_tool() {
+    local name="$1"
+    local package="$2"
+    local description="$3"
+
+    log_step "Installing $name via pip..."
+
+    if ! python3 -m pip install --user "$package" 2>&1 | tee -a "$INSTALL_LOG"; then
+        log_error "Failed to pip install $name"
+        return 1
+    fi
+
+    return 0
+}
+
+install_npm_tool() {
+    local name="$1"
+    local package="$2"
+    local description="$3"
+
+    log_step "Installing $name via npm..."
+
+    if ! npm install -g "$package" 2>&1 | tee -a "$INSTALL_LOG"; then
+        log_error "Failed to npm install $name"
+        return 1
+    fi
+
+    return 0
+}
+
+install_apt_tool() {
+    local name="$1"
+    local package="$2"
+    local description="$3"
+
+    log_step "Installing $name via apt..."
+
+    if ! sudo apt-get update && sudo apt-get install -y "$package" 2>&1 | tee -a "$INSTALL_LOG"; then
+        log_error "Failed to apt install $name"
+        return 1
+    fi
+
+    return 0
+}
+
+install_manual_tool() {
+    local name="$1"
+    local url="$2"
+    local description="$3"
+
+    log_warn "Manual installation required for $name"
+    log_info "Please install $name manually:"
+    log_info "  Website: $url"
+    log_info "  Description: $description"
+
+    return 1
+}
+
+download_binary_tool() {
+    local name="$1"
+    local url="$2"
+    local description="$3"
+
+    log_step "Downloading $name binary..."
+
+    mkdir -p "$INSTALL_DIR"
+    local binary_path="$INSTALL_DIR/$name"
+
+    if wget -q "$url" -O "$binary_path" 2>&1 | tee -a "$INSTALL_LOG"; then
+        chmod +x "$binary_path"
+        return 0
+    else
+        log_error "Failed to download $name"
+        return 1
+    fi
+}
+
+git_clone_tool() {
+    local name="$1"
+    local url="$2"
+    local description="$3"
+
+    log_step "Cloning $name repository..."
+
+    local temp_dir="$TEMP_DIR/$name"
+    if git clone "$url" "$temp_dir" 2>&1 | tee -a "$INSTALL_LOG"; then
+        # Look for install script or build manually
+        if [ -f "$temp_dir/setup.py" ]; then
+            cd "$temp_dir" && python3 setup.py install --user 2>&1 | tee -a "$INSTALL_LOG"
+        elif [ -f "$temp_dir/install.sh" ]; then
+            cd "$temp_dir" && bash install.sh 2>&1 | tee -a "$INSTALL_LOG"
+        else
+            log_error "No install method found for $name"
+            return 1
+        fi
+        return 0
+    else
+        log_error "Failed to clone $name"
+        return 1
+    fi
+}
+
+# ========= Tool Installation Handler =========
+
+install_single_tool() {
+    local name="$1"
+    local method="$2"
+    local package="$3"
+    local cmd="$4"
+    local description="$5"
+
+    # Check if already installed
+    if tool_exists "$name" || tool_installed_here "$name"; then
+        mark_tool_skipped "$name"
+        return 0
+    fi
+
+    log_info "Installing $name ($description)..."
+
+    case "$method" in
+        "go")
+            if install_go_tool "$name" "$package" "$description"; then
+                mark_tool_installed "$name"
+            else
+                mark_tool_failed "$name"
+            fi
+            ;;
+        "pip")
+            if install_pip_tool "$name" "$package" "$description"; then
+                mark_tool_installed "$name"
+            else
+                mark_tool_failed "$name"
+            fi
+            ;;
+        "npm")
+            if install_npm_tool "$name" "$package" "$description"; then
+                mark_tool_installed "$name"
+            else
+                mark_tool_failed "$name"
+            fi
+            ;;
+        "apt")
+            if install_apt_tool "$name" "$package" "$description"; then
+                mark_tool_installed "$name"
+            else
+                mark_tool_failed "$name"
+            fi
+            ;;
+        "manual")
+            install_manual_tool "$name" "$package" "$description"
+            mark_tool_failed "$name"
+            ;;
+        "download")
+            if download_binary_tool "$name" "$package" "$description"; then
+                mark_tool_installed "$name"
+            else
+                mark_tool_failed "$name"
+            fi
+            ;;
+        "git")
+            if git_clone_tool "$name" "$package" "$description"; then
+                mark_tool_installed "$name"
+            else
+                mark_tool_failed "$name"
+            fi
+            ;;
+        *)
+            log_error "Unknown installation method: $method"
+            mark_tool_failed "$name"
+            ;;
+    esac
 }
 
 # ========= Delete Mode =========
 
-delete_installed() {
-  log_info "Mode --delete: menghapus tools yang dikelola setup.sh dari /usr/local/bin"
-  log_info "Serta menghapus aset tambahan (wordlist & GF patterns) yang dipasang oleh setup.sh"
+delete_installed_tools() {
+    log_warn "Mode --delete: Removing all installed tools by BUGx setup"
 
-  echo "$TOOLS_DEFS" | while IFS='|' read -r name t pkg; do
-    name="$(printf "%s" "$name" | sed 's/#.*$//')"
-    [ -z "$name" ] && continue
+    # Remove all tools from install directory
+    if [ -d "$INSTALL_DIR" ]; then
+        log_info "Removing tools from $INSTALL_DIR"
+        while IFS='|' read -r name method package cmd description; do
+            [ -z "$name" ] || [[ "$name" =~ ^#.* ]] && continue
 
-    if [ -x "/usr/local/bin/$name" ]; then
-      if sudo rm -f "/usr/local/bin/$name"; then
-        log_ok "Deleted /usr/local/bin/$name"
-      else
-        log_error "Gagal menghapus /usr/local/bin/$name"
-        exit 1
-      fi
+            if [ -f "$INSTALL_DIR/$name" ]; then
+                if sudo rm -f "$INSTALL_DIR/$name" 2>/dev/null || rm -f "$INSTALL_DIR/$name"; then
+                    log_ok "Removed $INSTALL_DIR/$name"
+                else
+                    log_error "Failed to remove $INSTALL_DIR/$name"
+                fi
+            fi
+        done <<< "$TOOLS_LIST"
     fi
-  done
 
-  # Hapus clone wordlist jika dibuat oleh setup (lokasi standar)
-  if [ -d "$HOME/wordlist" ]; then
-    log_info "Menghapus direktori wordlist di $HOME/wordlist"
-    rm -rf "$HOME/wordlist" || log_warn "Gagal menghapus $HOME/wordlist (hapus manual jika perlu)."
-  fi
+    # Remove pip packages
+    log_info "Removing Python packages..."
+    while IFS='|' read -r name method package cmd description; do
+        [ -z "$name" ] || [[ "$name" =~ ^#.* ]] && continue
 
-  # Hapus GF patterns yang dikloning oleh setup
-  if [ -d "$HOME/Gf-Patterns" ]; then
-    log_info "Menghapus direktori GF patterns di $HOME/Gf-Patterns"
-    rm -rf "$HOME/Gf-Patterns" || log_warn "Gagal menghapus $HOME/Gf-Patterns (hapus manual jika perlu)."
-  fi
+        if [ "$method" = "pip" ]; then
+            if python3 -m pip uninstall -y "$package" 2>/dev/null; then
+                log_ok "Uninstalled Python package: $package"
+            fi
+        fi
+    done <<< "$TOOLS_LIST"
 
-  # Tidak menghapus ~/.gf karena bisa berisi pola milik user.
-  # Hanya beri informasi agar user tahu.
-  if [ -d "$HOME/.gf" ]; then
-    log_info "~/.gf TIDAK dihapus oleh --delete (bisa mengandung pola kustom user)."
-  fi
+    # Remove npm packages
+    log_info "Removing Node.js packages..."
+    while IFS='|' read -r name method package cmd description; do
+        [ -z "$name" ] || [[ "$name" =~ ^#.* ]] && continue
 
-  log_ok "Selesai. setup.sh, Go environment, dan konfigurasi pribadi user tidak dihapus."
-  exit 0
+        if [ "$method" = "npm" ]; then
+            if npm uninstall -g "$package" 2>/dev/null; then
+                log_ok "Uninstalled npm package: $package"
+            fi
+        fi
+    done <<< "$TOOLS_LIST"
+
+    # Remove temporary files
+    cleanup_temp_dir
+
+    log_ok "Cleanup completed!"
+    exit 0
 }
 
-# ========= Main Install Logic =========
+# ========= Check Mode =========
+
+check_installation_status() {
+    log_info "Checking installation status..."
+
+    echo
+    echo "=================================================="
+    echo "           INSTALLATION STATUS"
+    echo "=================================================="
+
+    while IFS='|' read -r name method package cmd description; do
+        [ -z "$name" ] || [[ "$name" =~ ^#.* ]] && continue
+
+        if tool_exists "$name" || tool_installed_here "$name"; then
+            printf "${GREEN}✓${NC} %-15s %s\n" "$name" "($description)"
+        else
+            printf "${RED}✗${NC} %-15s %s\n" "$name" "($description)"
+        fi
+    done <<< "$TOOLS_LIST"
+
+    echo "=================================================="
+}
+
+# ========= Main Installation =========
 
 main_install() {
-  ensure_go
+    create_temp_dir
 
-  log_info "Memulai pengecekan & instalasi tools BUG-X..."
-  log_info "Target install: $INSTALL_DIR"
+    log_info "Starting BUGx Comprehensive Setup"
+    log_info "OS Type: $OS_TYPE"
+    log_info "Install Directory: $INSTALL_DIR"
+    log_info "Log File: $INSTALL_LOG"
 
-  MISSING_REQUIRED=()
-  MISSING_MANUAL=()
-  INSTALLED=()
-
-  echo "$TOOLS_DEFS" | while IFS='|' read -r name t pkg; do
-    # bersihkan komentar / whitespace
-    name="$(printf "%s" "$name" | sed 's/#.*$//')"
-    t="$(printf "%s" "$t" | sed 's/#.*$//')"
-    pkg="$(printf "%s" "$pkg" | sed 's/#.*$//')"
-    [ -z "$name" ] && continue
-
-    if [ "$t" = "go" ]; then
-      # Cek di PATH atau INSTALL_DIR
-      # Jika sudah ada di /usr/local/bin, anggap sudah beres
-      if tool_exists_in_dir "$name" "$INSTALL_DIR"; then
-        log_ok "$name sudah ada di $INSTALL_DIR."
-        INSTALLED+=("$name")
-        continue
-      fi
-
-      # Jika ada di PATH tapi bukan di INSTALL_DIR, pindahkan ke INSTALL_DIR
-      if tool_exists_in_path "$name"; then
-        src_path="$(command -v "$name")"
-        if [ "$src_path" != "$INSTALL_DIR/$name" ]; then
-          log_info "$name terdeteksi di $src_path, memindahkan ke $INSTALL_DIR..."
-          if ! copy_if_needed "$src_path" "$INSTALL_DIR" "$name"; then
-            exit 1
-          fi
-        else
-          log_ok "$name sudah ada di $INSTALL_DIR."
-        fi
-        INSTALLED+=("$name")
-        continue
-      fi
-
-      # Cek di GOPATH/GOBIN
-      local gopath gobin found=""
-      gopath="$(go env GOPATH 2>/dev/null || echo "")"
-      gobin="$(go env GOBIN 2>/dev/null || echo "")"
-
-      if [ -n "$gobin" ] && [ -x "$gobin/$name" ]; then
-        found="$gobin/$name"
-      elif [ -n "$gopath" ] && [ -x "$gopath/bin/$name" ]; then
-        found="$gopath/bin/$name"
-      fi
-
-      if [ -n "$found" ]; then
-        log_info "$name ditemukan di $found, memindahkan ke $INSTALL_DIR..."
-        if ! copy_if_needed "$found" "$INSTALL_DIR" "$name"; then
-          exit 1
-        fi
-        INSTALLED+=("$name")
-        continue
-      fi
-
-      # Belum ada: install via go
-      if [ -z "$pkg" ]; then
-        log_error "Tidak ada paket Go untuk $name. Setup dihentikan."
+    # Ensure required tools are available
+    if ! command -v go >/dev/null 2>&1; then
+        log_error "Go is required but not installed!"
+        log_info "Please install Go from: https://golang.org/dl/"
         exit 1
-      fi
-
-      install_go_tool "$name" "$pkg"
-      INSTALLED+=("$name")
-
-    elif [ "$t" = "manual" ]; then
-      # Untuk manual tools, hanya catat jika ada di PATH atau INSTALL_DIR
-      if tool_exists_in_dir "$name" "$INSTALL_DIR"; then
-        log_ok "$name terdeteksi di $INSTALL_DIR (manual)."
-        INSTALLED+=("$name")
-      elif tool_exists_in_path "$name"; then
-        log_ok "$name terdeteksi di $(command -v "$name") (manual)."
-        INSTALLED+=("$name")
-      else
-        log_warn "$name tidak ditemukan (manual install required)."
-        MISSING_MANUAL+=("$name")
-      fi
-    else
-      log_warn "Tipe tool tidak dikenal untuk: $name"
     fi
-  done
 
-  # Buat ~/.gau.toml default jika belum ada
-  local gau_cfg="$HOME/.gau.toml"
-  if [ ! -f "$gau_cfg" ]; then
-    log_info "Membuat config default untuk gau di $gau_cfg"
-    cat >"$gau_cfg" <<'EOF'
-threads = 2
+    if ! command -v git >/dev/null 2>&1; then
+        log_error "Git is required but not installed!"
+        exit 1
+    fi
+
+    log_info "Required tools (go, git) are available"
+
+    # Create install directory
+    mkdir -p "$INSTALL_DIR"
+
+    log_info "Installing tools..."
+    echo
+
+    # Install each tool
+    while IFS='|' read -r name method package cmd description; do
+        [ -z "$name" ] || [[ "$name" =~ ^#.* ]] && continue
+
+        install_single_tool "$name" "$method" "$package" "$cmd" "$description"
+        echo
+    done <<< "$TOOLS_LIST"
+
+    # Setup additional configurations
+    setup_gau_config
+    setup_gf_patterns
+
+    # Print summary
+    print_summary
+
+    cleanup_temp_dir
+}
+
+# ========= Additional Setup =========
+
+setup_gau_config() {
+    local gau_config="$HOME/.gau.toml"
+
+    if [ ! -f "$gau_config" ]; then
+        log_info "Setting up gau configuration..."
+        cat > "$gau_config" <<'EOF'
+threads = 25
 verbose = false
 retries = 15
 subdomains = false
@@ -386,102 +538,109 @@ json = false
   filterstatuscodes = []
   filtermimetypes = ["image/png", "image/jpg", "image/svg+xml"]
 EOF
-    log_ok "Config gau default dibuat."
-  else
-    log_info "Config gau sudah ada di $gau_cfg, tidak diubah."
-  fi
-
-  # ========= Wordlist Setup =========
-  # Clone wordlist repo jika belum ada
-  if [ ! -d "$HOME/wordlist" ]; then
-    log_info "Meng-clone wordlist resmi ke $HOME/wordlist"
-    if git clone https://github.com/D0Lv-1N/wordlist.git "$HOME/wordlist"; then
-      log_ok "Wordlist ter-clone di $HOME/wordlist"
-    else
-      log_warn "Gagal clone repo wordlist. Silakan clone manual: https://github.com/D0Lv-1N/wordlist.git"
+        log_ok "Gau configuration created"
     fi
-  else
-    log_info "Direktori wordlist sudah ada di $HOME/wordlist, skip clone."
-  fi
+}
 
-  # ========= GF Patterns Setup =========
-  # 1. Pastikan folder pola ~/.gf ada
-  if [ ! -d "$HOME/.gf" ]; then
-    log_info "Membuat direktori pola GF di $HOME/.gf"
-    mkdir -p "$HOME/.gf" || log_warn "Gagal membuat $HOME/.gf, cek permission."
-  fi
+setup_gf_patterns() {
+    local gf_dir="$HOME/.gf"
+    local patterns_dir="$HOME/Gf-Patterns"
 
-  # 2. Clone pola komunitas jika belum ada
-  if [ ! -d "$HOME/Gf-Patterns" ]; then
-    log_info "Meng-clone GF patterns komunitas ke $HOME/Gf-Patterns"
-    if git clone https://github.com/1ndianl33t/Gf-Patterns.git "$HOME/Gf-Patterns"; then
-      log_ok "GF patterns ter-clone di $HOME/Gf-Patterns"
-    else
-      log_warn "Gagal clone GF patterns. Silakan clone manual: https://github.com/1ndianl33t/Gf-Patterns.git"
+    if [ ! -d "$gf_dir" ]; then
+        mkdir -p "$gf_dir"
     fi
-  else
-    log_info "Direktori GF patterns sudah ada di $HOME/Gf-Patterns, skip clone."
-  fi
 
-  # 3. Salin pola .json ke ~/.gf (hanya jika sumber ada)
-  if [ -d "$HOME/Gf-Patterns" ] && ls "$HOME/Gf-Patterns"/*.json >/dev/null 2>&1; then
-    log_info "Menyalin pola GF (*.json) ke $HOME/.gf"
-    cp "$HOME/Gf-Patterns"/*.json "$HOME/.gf"/ || log_warn "Gagal menyalin sebagian pola GF ke $HOME/.gf"
-  else
-    log_warn "Tidak menemukan file .json di $HOME/Gf-Patterns; lewati penyalinan pola GF."
-  fi
+    if [ ! -d "$patterns_dir" ]; then
+        log_info "Cloning GF patterns..."
+        if git clone https://github.com/1ndianl33t/Gf-Patterns.git "$patterns_dir" 2>/dev/null; then
+            log_ok "GF patterns cloned"
+        else
+            log_warn "Failed to clone GF patterns"
+        fi
+    fi
 
-  # ========= Summary =========
-  log_info "=================================================="
-  log_info "SUMMARY SETUP BUG-X"
-  log_info "Install dir: $INSTALL_DIR"
-  log_info "=================================================="
+    if [ -d "$patterns_dir" ] && ls "$patterns_dir"/*.json >/dev/null 2>&1; then
+        cp "$patterns_dir"/*.json "$gf_dir"/ 2>/dev/null || true
+        log_ok "GF patterns copied to $gf_dir"
+    fi
+}
 
-  # Cetak list tools terpasang & belum
-  echo "Tools terpasang / terdeteksi:"
-  echo "  - subfinder:      $(command -v subfinder  || echo 'MISSING')"
-  echo "  - httpx:          $(command -v httpx      || echo 'MISSING')"
-  echo "  - gau:            $(command -v gau        || echo 'MISSING')"
-  echo "  - waybackurls:    $(command -v waybackurls|| echo 'MISSING')"
-  echo "  - gf:             $(command -v gf         || echo 'MISSING')"
-  echo "  - dalfox:         $(command -v dalfox     || echo 'MISSING')"
-  echo "  - nuclei:         $(command -v nuclei     || echo 'MISSING')"
-  echo "  - ffuf:           $(command -v ffuf       || echo 'MISSING')"
-  echo "  - dnsx:           $(command -v dnsx       || echo 'MISSING')"
-  echo "  - amass:          $(command -v amass      || echo 'MISSING')"
-  echo "  - assetfinder:    $(command -v assetfinder|| echo 'MISSING')"
-  echo "  - sqlmap:         $(command -v sqlmap     || echo 'MISSING (manual)')"
-  echo "  - dirsearch:      $(command -v dirsearch  || echo 'MISSING (manual)')"
-  echo "  - gobuster:       $(command -v gobuster   || echo 'MISSING (manual)')"
-  echo "  - feroxbuster:    $(command -v feroxbuster|| echo 'MISSING (manual)')"
-  echo "  - wpscan:         $(command -v wpscan     || echo 'MISSING (manual)')"
-  echo "  - whatweb:        $(command -v whatweb    || echo 'MISSING (manual)')"
+# ========= Summary =========
 
-  echo "  - massdns:        $(command -v massdns    || echo 'MISSING (manual)')"
-  echo "  - findomain:      $(command -v findomain  || echo 'MISSING (manual)')"
+print_summary() {
+    echo
+    echo "=================================================="
+    echo "                INSTALLATION SUMMARY"
+    echo "=================================================="
 
-  echo
-  log_info "Wordlists: gunakan repo resmi: https://github.com/D0Lv-1N/wordlist.git"
-  log_info "GF Patterns: gunakan https://github.com/1ndianl33t/Gf-Patterns"
-  log_ok "Setup BUG-X selesai. Semua binary go-based telah dipindahkan ke /usr/local/bin (jika sukses)."
-  log_info "Pastikan /usr/local/bin ada di PATH Anda."
+    if [ ${#INSTALLED_TOOLS[@]} -gt 0 ]; then
+        echo
+        echo "Successfully Installed (${#INSTALLED_TOOLS[@]}):"
+        for tool in "${INSTALLED_TOOLS[@]}"; do
+            echo "  ✓ $tool"
+        done
+    fi
+
+    if [ ${#SKIPPED_TOOLS[@]} -gt 0 ]; then
+        echo
+        echo "Already Installed (${#SKIPPED_TOOLS[@]}):"
+        for tool in "${SKIPPED_TOOLS[@]}"; do
+            echo "  ⊘ $tool"
+        done
+    fi
+
+    if [ ${#FAILED_TOOLS[@]} -gt 0 ]; then
+        echo
+        echo "Failed/Manual Installation Required (${#FAILED_TOOLS[@]}):"
+        for tool in "${FAILED_TOOLS[@]}"; do
+            echo "  ✗ $tool"
+        done
+    fi
+
+    echo
+    echo "Installation Directory: $INSTALL_DIR"
+    echo "Installation Log: $INSTALL_LOG"
+    echo
+
+    # PATH check
+    if [[ ":$PATH:" != *":$INSTALL_DIR:"* ]]; then
+        log_warn "Install directory not in PATH. Add this to your shell profile:"
+        echo "  export PATH=\"$INSTALL_DIR:\$PATH\""
+    else
+        log_ok "Install directory is in PATH"
+    fi
+
+    # Tool count summary
+    local total=${#INSTALLED_TOOLS[@]}
+    total=$((total + ${#SKIPPED_TOOLS[@]}))
+    local success_rate=$(( (${#INSTALLED_TOOLS[@]} * 100) / total ))
+
+    echo
+    echo "Success Rate: $success_rate% (${#INSTALLED_TOOLS[@]}/$total tools ready to use)"
+    echo "=================================================="
 }
 
 # ========= Entry Point =========
 
-case "${1-}" in
-  --delete)
-    delete_installed
-    ;;
-  "")
-    log_info "Menjalankan BUG-X setup..."
-    main_install
-    ;;
-  *)
-    log_error "Argumen tidak dikenal: $1"
-    echo "Usage:"
-    echo "  ./$SCRIPT_NAME        # jalankan setup/install"
-    echo "  ./$SCRIPT_NAME --delete  # hapus tools yang diinstall setup"
-    exit 1
-    ;;
+case "${1:-}" in
+    --delete)
+        delete_installed_tools
+        ;;
+    --check)
+        check_installation_status
+        ;;
+    "")
+        main_install
+        ;;
+    *)
+        echo "Usage: $0 [OPTIONS]"
+        echo
+        echo "Options:"
+        echo "  (no args)    Install all tools"
+        echo "  --delete     Remove all installed tools"
+        echo "  --check      Check installation status"
+        echo
+        echo "This script installs 25+ bug hunting tools using multiple methods."
+        exit 1
+        ;;
 esac
